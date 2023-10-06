@@ -1,26 +1,72 @@
-import { Accessor, Component, createComputed, createSignal } from 'solid-js'
+import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { Surreal } from 'surrealdb.js';
+import { ConnectionOptions } from "surrealdb.js/script/types";
+export const db = new Surreal();
 
-export function createHello(): [Accessor<string>, (to: string) => void] {
-  const [hello, setHello] = createSignal('Hello World!')
+// TODO provider component that initialized the db connection
 
-  return [hello, (to: string) => setHello(`Hello ${to}!`)]
-}
+// https://surrealdb.com/docs/integration/sdks/javascript
+export const connect = async (
+  url: string = 'http://localhost:8000/rpc',
+  options?: ConnectionOptions
+) => db.connect(
+  url, {
+    ns: 'dev',
+    db: 'dev',
+    ...options,
+  }
+);
 
-export const Hello: Component<{ to?: string }> = props => {
-  const [hello, setHello] = createHello()
+type PartialKey<T, K extends keyof T> = Omit<T, K> & Partial<Pick<T, K>>
 
-  // Console calls will be removed in production if `dropConsole` is enabled
+export function useLiveQuery<T extends Record<string, unknown>>(
+  // TODO make sure thing: string is fine for other queries
+  thing: string,
+) {
+  const [things, setThings] = createSignal<T[]>([]);
+  const [queryUuid, setQueryUuid] = createSignal<string>();
 
-  // eslint-disable-next-line no-console
-  console.log('Hello World!')
-
-  createComputed(() => {
-    if (typeof props.to === 'string') setHello(props.to)
+  onMount(async () => {
+    const things = await db.select<T>(thing);
+    setThings(things)
   })
 
-  return (
-    <>
-      <div>{hello()}</div>
-    </>
-  )
+  createEffect(async () => {
+    const queryId = await db.live<T>(thing, ({ action, result }) => {
+      console.log(`New ${action} for ${thing}`, result);
+
+      switch (action) {
+        case "CLOSE": return;
+        case "CREATE": return setThings(items => [...items, result ]);
+        case "DELETE": return setThings(items => items.filter(
+          item => item.id !== result // result for DELETE is a the id
+        ));
+        case "UPDATE": return setThings(items => items.map(
+          item => item.id === result.id ? result  : item
+        ));
+      }
+    })
+    setQueryUuid(queryId)
+  })
+
+  onCleanup(async () => {
+    const uuid = queryUuid()
+    if (uuid) {
+      await db.kill(uuid)
+    }
+  })
+
+  const create = async (item: PartialKey<T, 'id'>) => {
+    return await db.create(thing, item);
+  }
+
+  const merge = async (thing: string, item: Partial<T>) => {
+    return await db.merge(thing, item);
+  }
+
+  const remove = async (thing: string) => {
+    return await db.delete(thing);
+  }
+
+  return [things, { merge, create, remove }] as const;
 }
